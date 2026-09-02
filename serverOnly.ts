@@ -1,6 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
+// Forzar la zona horaria a Paraguay para todo el backend
+process.env.TZ = 'America/Asuncion';
+
 // Configurar escritura automática de logs en log.txt dentro de la raíz del backend
 const logFilePath = path.resolve(process.cwd(), 'log.txt');
 const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });

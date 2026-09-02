@@ -1038,10 +1038,12 @@ router.post('/sap/convertia', async (req, res) => {
         newDocNumSalida = exitRes.data.DocNum;
       } else {
         const errorDetail = exitRes.data?.error?.message?.value || exitRes.data?.error?.message || JSON.stringify(exitRes.data);
-        console.warn(`[ExtendIA] Service Layer Exit failed (status ${exitRes.status}): ${errorDetail}, using simulated numbers for DB logging.`);
+        console.warn(`[ExtendIA] Service Layer Exit failed (status ${exitRes.status}): ${errorDetail}`);
+        return res.status(exitRes.status).json({ success: false, message: `Error en SAP (Salida de Mercancías): ${errorDetail}` });
       }
     } catch (err: any) {
-      console.warn(`[ExtendIA] Service Layer Exit network error: ${err?.message || err}, using simulated numbers for DB logging.`);
+      console.error(`[ExtendIA] Service Layer Exit network error: ${err?.message || err}`);
+      return res.status(500).json({ success: false, message: `Error de red con SAP (Salida de Mercancías): ${err?.message || String(err)}` });
     }
   }
 
@@ -1131,10 +1133,12 @@ router.post('/sap/convertia', async (req, res) => {
         newDocNumEntrada = entryRes.data.DocNum;
       } else {
         const errorDetail = entryRes.data?.error?.message?.value || entryRes.data?.error?.message || JSON.stringify(entryRes.data);
-        console.warn(`[ExtendIA] Service Layer Entry failed (status ${entryRes.status}): ${errorDetail}, using simulated numbers for DB logging.`);
+        console.warn(`[ExtendIA] Service Layer Entry failed (status ${entryRes.status}): ${errorDetail}`);
+        return res.status(entryRes.status).json({ success: false, message: `Error en SAP (Entrada de Mercancías): ${errorDetail}` });
       }
     } catch (err: any) {
-      console.warn(`[ExtendIA] Service Layer Entry network error: ${err?.message || err}, using simulated numbers for DB logging.`);
+      console.error(`[ExtendIA] Service Layer Entry network error: ${err?.message || err}`);
+      return res.status(500).json({ success: false, message: `Error de red con SAP (Entrada de Mercancías): ${err?.message || String(err)}` });
     }
   }
 
@@ -1345,6 +1349,9 @@ router.post('/sap/execute-conversion', async (req, res) => {
       if (issueRes.status === 201 || issueRes.status === 200) {
         goodsIssueDocNum = issueRes.data.DocNum || goodsIssueDocNum;
         goodsIssueDocEntry = issueRes.data.DocEntry || goodsIssueDocEntry;
+      } else {
+        const errDetail = issueRes.data?.error?.message?.value || issueRes.data?.error?.message || JSON.stringify(issueRes.data);
+        return res.status(issueRes.status).json({ success: false, message: `Error en SAP (Salida de Mercancías): ${errDetail}` });
       }
 
       const goodsReceiptBody: any = {
@@ -1384,9 +1391,13 @@ router.post('/sap/execute-conversion', async (req, res) => {
         goodsReceiptDocNum = receiptRes.data.DocNum || goodsReceiptDocNum;
         goodsReceiptDocEntry = receiptRes.data.DocEntry || goodsReceiptDocEntry;
         journalTrans = receiptRes.data.TransNum || journalTrans;
+      } else {
+        const errDetail = receiptRes.data?.error?.message?.value || receiptRes.data?.error?.message || JSON.stringify(receiptRes.data);
+        return res.status(receiptRes.status).json({ success: false, message: `Error en SAP (Entrada de Mercancías): ${errDetail}` });
       }
-    } catch (err) {
-      console.warn('Real SAP request failed, continuing with simulated record:', err);
+    } catch (err: any) {
+      console.error('Real SAP request failed:', err);
+      return res.status(500).json({ success: false, message: `Error de red con SAP: ${err.message}` });
     }
   }
 
