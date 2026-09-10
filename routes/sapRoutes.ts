@@ -546,16 +546,18 @@ router.get('/sap/inventory', async (req, res) => {
   const safeSchema = String(schema).replace(/[^a-zA-Z0-9_]/g, '');
   const formattedInClause = selectedLines.map(line => `'${line.replace(/'/g, "''")}'`).join(', ');
 
-  const invQuery = `SELECT "ItemCode" AS "CODIGO_SAP", "ItemName" AS "DESCRIPCION", "Lote/Serie" AS "LOTE / SERIE", SUM("Quantity") AS "DISPONIBLE", sum("CostoT") AS "COST_OTOTAL", "ArtEq" AS "ART_EQUIVALENTE", sum("EqQty") as "CANT_EQUIVALENTE", round(sum("CostoT")/sum("EqQty"),0) AS "COST_EQUIV_UNITARIO", "UNIDAD_NEGOCIO" FROM (
-    SELECT 'Lote' AS "Lote/Serie", T0."ItemCode", T1."ItemName", T2."SysNumber", T2."DistNumber", T2."MnfSerial", T0."Quantity", t1."U_ItemEq" AS "ArtEq", (t1."U_ItemQty" * T0."Quantity") AS "EqQty", (t0."Quantity" * t1."AvgPrice") AS "CostoT", T1."U_UN_CC" AS "UNIDAD_NEGOCIO"
+  const invQuery = `SELECT "ItemCode" AS "CODIGO_SAP", "ItemName" AS "DESCRIPCION", "validFor" AS "Activo","Lote/Serie" AS "LOTE / SERIE", SUM("Quantity") AS "DISPONIBLE", sum("CostoT") AS "COST_OTOTAL", "ArtEq" AS "ART_EQUIVALENTE","DescEquiv" AS "DESC_EQUIVALENTE","Valido" ,sum("EqQty") as "CANT_EQUIVALENTE", round(sum("CostoT")/sum("EqQty"),0) AS "COST_EQUIV_UNITARIO", "UNIDAD_NEGOCIO" FROM (
+    SELECT 'Lote' AS "Lote/Serie", T0."ItemCode", T1."ItemName", T2."SysNumber", T2."DistNumber", T2."MnfSerial", T0."Quantity", t1."validFor",t1."U_ItemEq" AS "ArtEq",C."ItemName" AS "DescEquiv", c."validFor" AS "Valido",(t1."U_ItemQty" * T0."Quantity") AS "EqQty", (t0."Quantity" * t1."AvgPrice") AS "CostoT", T1."U_UN_CC" AS "UNIDAD_NEGOCIO"
     FROM "${safeSchema}"."OBTQ" T0 INNER JOIN "${safeSchema}"."OITM" T1 ON T0."ItemCode" = T1."ItemCode" INNER JOIN "${safeSchema}"."OBTN" T2 ON T0."MdAbsEntry" = T2."AbsEntry"
+    LEFT OUTER JOIN "${safeSchema}"."OITM" C ON T1."U_ItemEq" = C."ItemCode" 
     WHERE T0."Quantity" > 0 AND T0."ItemCode" <> 'zprueba' AND T0."WhsCode" = '${safeWhsCode}' AND T1."U_UN_CC" IN (${formattedInClause})
     UNION ALL
-    SELECT 'Serie' AS "Lote/Serie", T0."ItemCode", T1."ItemName", T2."SysNumber", T2."DistNumber", T2."MnfSerial", T0."Quantity", t1."U_ItemEq" AS "ArtEq", (t1."U_ItemQty" * T0."Quantity") AS "EqQty", (t0."Quantity" * t1."AvgPrice") AS "CostoT", T1."U_UN_CC" AS "UNIDAD_NEGOCIO"
+    SELECT 'Serie' AS "Lote/Serie", T0."ItemCode", T1."ItemName", T2."SysNumber", T2."DistNumber", T2."MnfSerial", T0."Quantity", t1."validFor",t1."U_ItemEq" AS "ArtEq",C."ItemName" AS "DescEquiv", c."validFor" AS "Valido",(t1."U_ItemQty" * T0."Quantity") AS "EqQty", (t0."Quantity" * t1."AvgPrice") AS "CostoT", T1."U_UN_CC" AS "UNIDAD_NEGOCIO"
     FROM "${safeSchema}"."OSRQ" T0 INNER JOIN "${safeSchema}"."OITM" T1 ON T0."ItemCode" = T1."ItemCode" INNER JOIN "${safeSchema}"."OSRN" T2 ON T0."MdAbsEntry" = T2."AbsEntry"
+    LEFT OUTER JOIN "${safeSchema}"."OITM" C ON T1."U_ItemEq" = C."ItemCode"
     WHERE T0."Quantity" > 0 AND T0."ItemCode" <> 'zprueba' AND T0."WhsCode" = '${safeWhsCode}' AND T1."U_UN_CC" IN (${formattedInClause})
   )
-  GROUP BY "ItemCode", "ItemName", "Lote/Serie", "ArtEq", "UNIDAD_NEGOCIO"
+  GROUP BY "ItemCode", "ItemName", "Lote/Serie", "ArtEq", "DescEquiv","UNIDAD_NEGOCIO","validFor","Valido"
   ORDER BY 1`;
 
   try {
@@ -586,6 +588,10 @@ router.get('/sap/inventory', async (req, res) => {
         const costEqUnit = Number(getV('COST_EQUIV_UNITARIO', 'CostEquivUnitario') ?? 0);
         const unidadNegocio = String(getV('UNIDAD_NEGOCIO', 'Unidad_Negocio', 'U_UN_CC', 'unidadNegocio') ?? selectedLines[0] ?? '').trim();
 
+        const activoRaw = String(getV('Activo') ?? 'Y').trim();
+        const validoRaw = String(getV('Valido') ?? 'Y').trim();
+        const descEquiv = String(getV('DESC_EQUIVALENTE', 'DescEquiv') ?? '').trim();
+
         const isLote = loteSerieRaw.toLowerCase().includes('lote');
 
         return {
@@ -600,6 +606,9 @@ router.get('/sap/inventory', async (req, res) => {
           WarehouseStock: disponible,
           CostoTotal: costTotal,
           ArticuloEquivalente: artEq || 'SIN EQUIVALENCIA',
+          DescEquivalente: descEquiv,
+          Activo: activoRaw === 'Y',
+          Valido: validoRaw === 'Y',
           CantidadEquivalente: cantEq || disponible,
           CostoEquivUnitario: costEqUnit || (disponible > 0 ? costTotal / disponible : 100),
           UnidadNegocio: unidadNegocio,
@@ -655,25 +664,106 @@ router.get('/sap/finished-goods', async (_req, res) => {
 });
 
 // API: History
-router.get('/sap/history', async (_req, res) => {
+router.get('/sap/history', async (req, res) => {
   try {
+    const { startDate, endDate, schema } = req.query;
     await ensureConversionTablesExist();
-    const historyRes = await pgPool.query(
-      `SELECT * FROM convertia."CONVERSIONES" ORDER BY "nroConv" DESC LIMIT 50`
-    );
-    const history = historyRes.rows || [];
-    for (const row of history) {
-      try {
-        const detRes = await pgPool.query(
-          `SELECT * FROM convertia."DETCONVERSIONES" WHERE "nroConv" = $1 ORDER BY id ASC`,
-          [row.nroConv]
-        );
-        row.details = detRes.rows || [];
-      } catch (e) {
-        row.details = [];
+
+    // Fallback if schema not provided in query
+    const targetSchema = String(schema || 'FG_PROD');
+
+    let baseQuery = `
+      select a."nroConv" , to_char(a."FechaReal" ,'DD/MM/YYYY')as "Fecha",A."User"  as "CodUsuario",
+      case when a."Estado" = 'S' then 'Salida'
+      when a."Estado" = 'E' then 'Entrada'
+      when a."Estado" = 'M' then 'Migrado' end as "Estado",a."Schema" ,b."ItemCode" as "CodArticulo",b."Dscription" as "NombArticulo",a."WhsSal" as "AlmSalida",a."DocEntrySal" as "DESalida", a."DocNumSal" as "DNSalida",a."WhsEnt" as "AlmEntrada", 
+      a."DocEntryEnt" as "DEEntrada",a."DocNumEnt" as "DNEntrada",b."Qty" as "Cantidad", 
+      b."Objeto"  from convertia."CONVERSIONES" a left outer join convertia."DETCONVERSIONES" b
+      on a."nroConv" = b."nroConv" 
+      where a."Schema" = $1
+    `;
+    const queryParams: any[] = [targetSchema];
+    let paramIndex = 2;
+
+    if (startDate) {
+      baseQuery += ` AND a."FechaReal" :: date >= $${paramIndex}`;
+      queryParams.push(startDate);
+      paramIndex++;
+    }
+    if (endDate) {
+      baseQuery += ` AND a."FechaReal" :: date <= $${paramIndex}`;
+      queryParams.push(endDate);
+      paramIndex++;
+    }
+
+    baseQuery += ` order by A."nroConv" desc`;
+
+    const historyRes = await pgPool.query(baseQuery, queryParams);
+
+    // Group the flat results by nroConv
+    const grouped = new Map<number, any>();
+
+    for (const row of historyRes.rows) {
+      if (!grouped.has(row.nroConv)) {
+        grouped.set(row.nroConv, {
+          id: String(row.nroConv), // Backward compatibility for HistoryTraceView
+          nroConv: row.nroConv,
+          FechaSalida: row.Fecha,
+          docDate: row.Fecha, // Backward compatibility
+          User: row.CodUsuario,
+          Estado: row.Estado,
+          Schema: row.Schema,
+          WhsSal: row.AlmSalida,
+          sourceWarehouse: row.AlmSalida, // Backward compatibility
+          DocEntrySal: row.DESalida,
+          goodsIssueDocEntry: row.DESalida, // Backward compatibility
+          DocNumSal: row.DNSalida,
+          goodsIssueDocNum: row.DNSalida, // Backward compatibility
+          WhsEnt: row.AlmEntrada,
+          targetWarehouse: row.AlmEntrada, // Backward compatibility
+          DocEntryEnt: row.DEEntrada,
+          goodsReceiptDocEntry: row.DEEntrada, // Backward compatibility
+          DocNumEnt: row.DNEntrada,
+          goodsReceiptDocNum: row.DNEntrada, // Backward compatibility
+          details: [],
+          consumedComponents: [], // Backward compatibility
+          totalCost: 0, // Fallback
+          targetItemCode: 'N/A', // Fallback
+          targetItemName: 'N/A', // Fallback
+          targetQuantity: 0, // Fallback
+        });
+      }
+
+      const group = grouped.get(row.nroConv);
+
+      if (row.CodArticulo) {
+        // New structure details
+        group.details.push({
+          ItemCode: row.CodArticulo,
+          Dscription: row.NombArticulo,
+          Qty: row.Cantidad,
+          Objeto: row.Objeto
+        });
+
+        // Backward compatibility mapping for HistoryTraceView
+        if (row.Objeto === 'OIGN') {
+          group.targetItemCode = row.CodArticulo;
+          group.targetItemName = row.NombArticulo;
+          group.targetQuantity += Number(row.Cantidad) || 0;
+        } else if (row.Objeto === 'OIGE' || !row.Objeto) {
+          group.consumedComponents.push({
+            itemCode: row.CodArticulo,
+            itemName: row.NombArticulo,
+            quantity: Number(row.Cantidad) || 0,
+            unitCost: 0,
+            totalCost: 0,
+            uom: 'PZA'
+          });
+        }
       }
     }
-    res.json({ history });
+
+    res.json({ history: Array.from(grouped.values()) });
   } catch (err: any) {
     res.json({ history: [], error: err.message });
   }
@@ -782,6 +872,8 @@ router.post('/sap/convertia', async (req, res) => {
 
   const processedLines: Array<{
     itemCode: string;
+    itemName: string;
+    descEquiv: string;
     isLote: boolean;
     quantity: number;
     artEq: string;
@@ -979,6 +1071,8 @@ router.post('/sap/convertia', async (req, res) => {
 
     processedLines.push({
       itemCode,
+      itemName: String(item.ItemName || item.ItemCode || '').trim(),
+      descEquiv: String(item.DescEquivalente || item.ArticuloEquivalente || item.ArtEq || '').trim(),
       isLote,
       quantity: isLote ? batchList.reduce((a, b) => a + b.quantity, 0) : serialList.length,
       artEq: artEq || 'ART_EQUIVALENTE',
@@ -1059,7 +1153,7 @@ router.post('/sap/convertia', async (req, res) => {
        ("WhsSal", "DocEntrySal", "DocNumSal", "FechaSalida", "WhsEnt", "DocEntryEnt", "DocNumEnt", "FechaEntrada", "User", "Estado","Schema")
        VALUES ($1, $2, $3, $4,  '', 0, 0, $4, $5, 'S', $6)
        RETURNING "nroConv"`,
-       [safeWhsCode, newDocEntrySalida, newDocNumSalida, todayStr, currentUser, safeSchema]
+      [safeWhsCode, newDocEntrySalida, newDocNumSalida, todayStr, currentUser, safeSchema]
     );
 
     if (insertHeaderRes.rows && insertHeaderRes.rows.length > 0) {
@@ -1077,7 +1171,7 @@ router.post('/sap/convertia', async (req, res) => {
           `INSERT INTO convertia."DETCONVERSIONES"
            ("nroConv", "ItemCode", "Dscription", "Qty", "Objeto")
            VALUES ($1, $2, $3, $4, 'OIGE')`,
-          [nroConv, p.itemCode, p.itemCode, p.quantity]
+          [nroConv, p.itemCode, p.itemName, p.quantity]
         );
       } catch (err: any) {
         console.error('[Postgres Log Error - DETCONVERSIONES OIGE]:', err.message);
@@ -1177,9 +1271,9 @@ router.post('/sap/convertia', async (req, res) => {
   //   }
   // }
   if (nroConv) {
-  try {
-    await pgPool.query(
-      `UPDATE convertia."CONVERSIONES"
+    try {
+      await pgPool.query(
+        `UPDATE convertia."CONVERSIONES"
        SET "WhsEnt" = $1,
            "DocEntryEnt" = $2,
            "DocNumEnt" = $3,
@@ -1187,25 +1281,25 @@ router.post('/sap/convertia', async (req, res) => {
            "User" = $5,
            "Estado" = 'E'
        WHERE "nroConv" = $6`,
-      [safeTargetWhsCode, newDocEntryEntrada, newDocNumEntrada, todayStr, currentUser, nroConv]
-    );
-  } catch (err: any) {
-    console.error('[Postgres Log Error - Entrada CONVERSIONES]:', err.message);
-  }
-
-  for (const p of processedLines) {
-    try {
-      await pgPool.query(
-        `INSERT INTO convertia."DETCONVERSIONES"
-         ("nroConv", "ItemCode", "Dscription", "Qty", "Objeto")
-         VALUES ($1, $2, $3, $4, 'OIGN')`,
-        [nroConv, p.artEq, p.artEq, p.cantEq]
+        [safeTargetWhsCode, newDocEntryEntrada, newDocNumEntrada, todayStr, currentUser, nroConv]
       );
     } catch (err: any) {
-      console.error('[Postgres Log Error - DETCONVERSIONES OIGN]:', err.message);
+      console.error('[Postgres Log Error - Entrada CONVERSIONES]:', err.message);
+    }
+
+    for (const p of processedLines) {
+      try {
+        await pgPool.query(
+          `INSERT INTO convertia."DETCONVERSIONES"
+         ("nroConv", "ItemCode", "Dscription", "Qty", "Objeto")
+         VALUES ($1, $2, $3, $4, 'OIGN')`,
+          [nroConv, p.artEq, p.descEquiv, p.cantEq]
+        );
+      } catch (err: any) {
+        console.error('[Postgres Log Error - DETCONVERSIONES OIGN]:', err.message);
+      }
     }
   }
-}
   const patchPayload = {
     DocumentReferences: [
       {
@@ -1309,7 +1403,7 @@ router.post('/sap/execute-conversion', async (req, res) => {
         }
       }
     }
-  } catch (err) {}
+  } catch (err) { }
 
   if (sessionInfo && !session?.isDemoMode) {
     try {
@@ -1439,7 +1533,7 @@ router.post('/sap/execute-conversion', async (req, res) => {
        ("nroConv", "WhsSal", "DocEntrySal", "DocNumSal", "FechaSalida", "WhsEnt", "DocEntryEnt", "DocNumEnt", "FechaEntrada", "User", "Estado","Schema")
        VALUES ($1, $2, $3, $4, $5, '', 0, 0, $5, $6, 'S',$6)
        RETURNING "nroConv"`,
-      [calculatedNroConv, sourceWarehouse || '', goodsIssueDocEntry, goodsIssueDocNum, todayStr, currentUser,String(currentSchema).trim()]
+      [calculatedNroConv, sourceWarehouse || '', goodsIssueDocEntry, goodsIssueDocNum, todayStr, currentUser, String(currentSchema).trim()]
     );
 
     const nroConv = headerRes.rows?.[0]?.nroConv ? parseInt(headerRes.rows[0].nroConv, 10) : calculatedNroConv;
@@ -1500,4 +1594,173 @@ router.post('/sap/execute-conversion', async (req, res) => {
   res.json(result);
 });
 
+// API: Continue stuck conversion (Estado 'S' or 'E')
+router.post('/sap/continue-conversion', async (req, res) => {
+  const { nroConv, session, schema: schemaParam } = req.body;
+  if (!nroConv) return res.status(400).json({ success: false, message: 'Falta nroConv' });
+
+  let reqSessionId = req.header('X-SAP-Session') || req.header('X-SAP-B1SESSION') || session?.sessionId || session?.SessionId || session?.b1session;
+  let sessionInfo = reqSessionId ? activeSessions.get(reqSessionId) : null;
+  
+  if (!sessionInfo && activeSessions.size > 0) {
+    for (const [sId, sData] of activeSessions.entries()) {
+      if (!reqSessionId) reqSessionId = sId;
+      if (!schemaParam || sData.companyDB?.toUpperCase() === String(schemaParam).toUpperCase()) {
+        sessionInfo = sData;
+        reqSessionId = sId;
+        break;
+      }
+      if (!sessionInfo) sessionInfo = sData;
+    }
+  }
+
+  const schema = schemaParam || req.query.schema || req.header('X-SAP-CompanyDB') || sessionInfo?.companyDB || session?.companyDB || session?.BD || 'FG_PROD';
+  const b1session = sessionInfo?.b1session || reqSessionId || session?.sessionId || session?.SessionId;
+  const serverUrl = sessionInfo?.serverUrl || session?.serverUrl || currentSapConfig.serviceLayerUrl || 'https://172.19.0.88:50000/b1s/v1';
+  const routeId = sessionInfo?.routeId || session?.routeId || '';
+  const isDemo = session?.isDemoMode || currentSapConfig.isSandbox;
+  const currentUser = (req.header('X-SAP-UserCode') || sessionInfo?.userName || session?.userName || session?.user_code || 'gualber') as string;
+
+  if (!isDemo && !b1session) {
+    return res.status(401).json({ success: false, message: 'No hay una sesión activa en SAP Service Layer.' });
+  }
+
+  const safeSchema = String(schema).replace(/[^a-zA-Z0-9_]/g, '');
+
+  try {
+    const headerRes = await pgPool.query(`SELECT * FROM convertia."CONVERSIONES" WHERE "nroConv" = $1`, [nroConv]);
+    if (headerRes.rowCount === 0) return res.status(404).json({ success: false, message: 'Conversión no encontrada' });
+    
+    let conv = headerRes.rows[0];
+    
+    // Si la conversión está en 'S', procesamos la Entrada (OIGN)
+    if (conv.Estado === 'S') {
+      const pgOige = await pgPool.query(`SELECT "ItemCode", "Qty" FROM convertia."DETCONVERSIONES" WHERE "nroConv" = $1 AND "Objeto" = 'OIGE'`, [nroConv]);
+      if (pgOige.rowCount === 0) return res.status(400).json({ success: false, message: 'No hay items OIGE para continuar' });
+
+      const processedLines = [];
+      for (const item of pgOige.rows) {
+        const itemCode = String(item.ItemCode).replace(/'/g, "''");
+        const qty = Number(item.Qty) || 1;
+        
+        const hanaQuery = `SELECT A."U_ItemEq" AS "artEq", B."ItemName" AS "descEq", (A."U_ItemQty" * ${qty}) AS "cantEq", ((${qty} * A."AvgPrice")/(A."U_ItemQty" * ${qty})) AS "costEqUnit" FROM "${safeSchema}"."OITM" A LEFT OUTER JOIN "${safeSchema}"."OITM" B ON A."U_ItemEq" = B."ItemCode" WHERE A."ItemCode" = '${itemCode}'`;
+        const hanaRes = await executeHanaQuery(hanaQuery);
+        
+        if (hanaRes.success && Array.isArray(hanaRes.rows) && hanaRes.rows.length > 0) {
+          const row = hanaRes.rows[0];
+          processedLines.push({
+            artEq: row.artEq || row.ARTEQ,
+            cantEq: Number(row.cantEq || row.CANTEQ),
+            costEqUnit: Number(row.costEqUnit || row.COSTEQUNIT),
+            descEquiv: row.descEq || row.DESCEQ || row.artEq || row.ARTEQ
+          });
+        }
+      }
+
+      if (processedLines.length === 0) return res.status(400).json({ success: false, message: 'No se encontraron artículos equivalentes válidos en HANA.' });
+
+      // Determine Target Warehouse
+      let targetWhs = conv.WhsSal;
+      if (targetWhs.toUpperCase().endsWith('-OPE')) {
+        targetWhs = targetWhs.toUpperCase().replace(/-OPE$/, '-VEN');
+      }
+      try {
+        const pgWhsRes = await pgPool.query(`SELECT "equWhsCode" FROM convertia."OWHS" WHERE "whsCode" = $1 LIMIT 1`, [conv.WhsSal]);
+        if (pgWhsRes.rowCount > 0 && pgWhsRes.rows[0].equWhsCode) {
+          targetWhs = pgWhsRes.rows[0].equWhsCode;
+        }
+      } catch (e) {}
+
+      const todayStr = getPyDateString();
+      const entryPayload = {
+        DocDate: todayStr,
+        DocDueDate: todayStr,
+        Comments: `ExtendIA Continuación: Entrada de mercadería desde Salida #\${conv.DocNumSal}`,
+        DocumentLines: processedLines.map((p, idx) => ({
+          LineNum: idx,
+          ItemCode: p.artEq,
+          Quantity: p.cantEq,
+          WarehouseCode: targetWhs,
+          UnitPrice: p.costEqUnit,
+        }))
+      };
+
+      let newDocEntryEnt = 0;
+      let newDocNumEnt = 0;
+
+      if (!isDemo) {
+        const entryRes = await makeSapRequest(serverUrl, 'InventoryGenEntries', {
+          method: 'POST',
+          body: entryPayload,
+          sessionId: b1session,
+          routeId: routeId,
+        });
+
+        if (entryRes.status === 201 || entryRes.status === 200) {
+          newDocEntryEnt = entryRes.data.DocEntry;
+          newDocNumEnt = entryRes.data.DocNum;
+        } else {
+          return res.status(entryRes.status).json({ success: false, message: `Error SAP Entrada: ${JSON.stringify(entryRes.data)}` });
+        }
+      } else {
+        newDocEntryEnt = Math.floor(4000 + Math.random() * 500);
+        newDocNumEnt = Math.floor(20000 + Math.random() * 900);
+      }
+
+      await pgPool.query(
+        `UPDATE convertia."CONVERSIONES" SET "WhsEnt" = $1, "DocEntryEnt" = $2, "DocNumEnt" = $3, "FechaEntrada" = $4, "Estado" = 'E' WHERE "nroConv" = $5`,
+        [targetWhs, newDocEntryEnt, newDocNumEnt, todayStr, nroConv]
+      );
+
+      for (const p of processedLines) {
+        await pgPool.query(
+          `INSERT INTO convertia."DETCONVERSIONES" ("nroConv", "ItemCode", "Dscription", "Qty", "Objeto") VALUES ($1, $2, $3, $4, 'OIGN')`,
+          [nroConv, p.artEq, p.descEquiv, p.cantEq]
+        );
+      }
+      
+      // Update local conv object for next step
+      conv.DocEntryEnt = newDocEntryEnt;
+      conv.Estado = 'E';
+    }
+
+    // Si la conversión está en 'E' (ya sea originalmente o tras el paso anterior), procesamos el PATCH
+    if (conv.Estado === 'E') {
+      const todayStr = getPyDateString();
+      const patchPayload = {
+        DocumentReferences: [{
+          RefDocEntr: conv.DocEntrySal,
+          RefDocNum: conv.DocNumSal,
+          RefObjType: 'rot_GoodsIssue',
+          IssueDate: todayStr,
+          Remark: 'Vinculación ExtendIA',
+        }],
+      };
+
+      if (!isDemo && conv.DocEntryEnt) {
+        try {
+          await makeSapRequest(serverUrl, `InventoryGenEntries(${conv.DocEntryEnt})`, {
+            method: 'PATCH',
+            body: patchPayload,
+            sessionId: b1session,
+            routeId: routeId,
+          });
+        } catch (err: any) {
+          console.error('[Continuación] PATCH failed', err?.message);
+          return res.status(500).json({ success: false, message: 'Error parcheando (vinculando) en SAP B1.' });
+        }
+      }
+
+      await pgPool.query(`UPDATE convertia."CONVERSIONES" SET "Estado" = 'M' WHERE "nroConv" = $1`, [nroConv]);
+      conv.Estado = 'M';
+    }
+
+    return res.json({ success: true, message: 'Conversión continuada exitosamente.', estadoActual: conv.Estado });
+  } catch (err: any) {
+    console.error('[Continue Conversion Error]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 export default router;
+
